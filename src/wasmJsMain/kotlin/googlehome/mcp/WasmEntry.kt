@@ -2,6 +2,7 @@
 
 package googlehome.mcp
 
+import googlehome.mcp.server.InMemoryPasscodeStore
 import io.ktor.client.engine.js.Js
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -52,7 +53,7 @@ private fun String.orNull(): String? = takeIf { it.isNotBlank() }
  */
 @JsExport
 fun initGoogleHomeMcp(masterToken: String) {
-    instance = GoogleHomeMcp(masterToken = masterToken, engine = Js.create())
+    instance = GoogleHomeMcp(masterToken = masterToken, engine = Js.create(), passcodes = InMemoryPasscodeStore())
 }
 
 /**
@@ -63,7 +64,7 @@ fun initGoogleHomeMcp(masterToken: String) {
  */
 @JsExport
 fun initGoogleHomeMcpWithDeviceId(masterToken: String, androidId: String) {
-    instance = GoogleHomeMcp(masterToken = masterToken, engine = Js.create(), androidId = androidId)
+    instance = GoogleHomeMcp(masterToken = masterToken, engine = Js.create(), androidId = androidId, passcodes = InMemoryPasscodeStore())
 }
 
 // -------------------------------------------------------------------------------------------------

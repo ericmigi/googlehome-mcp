@@ -41,7 +41,11 @@ import kotlinx.serialization.json.put
  * Tools are exposed via [tools]; handlers return [JsonElement] results (wasmJs-safe). The JVM
  * entrypoint adapts each [GhTool] to a real MCP SDK `Tool`.
  */
-class GoogleHomeMcpServer(private val foyer: GoogleHomeFoyerClient) {
+class GoogleHomeMcpServer(
+    private val foyer: GoogleHomeFoyerClient,
+    /** Persists the smart-lock unlock PIN so `unlock` can omit it; null = no persistence in this build. */
+    private val passcodes: PasscodeStore? = null,
+) {
 
     private val resolver = DeviceResolver(foyer)
 
@@ -188,16 +192,43 @@ class GoogleHomeMcpServer(private val foyer: GoogleHomeFoyerClient) {
 
     val unlockTool: GhTool = GhTool(
         name = "unlock",
-        description = "Unlock smart locks. Requires the lock PIN (unlock is PIN-gated). Scope with " +
-            "name/room/type, e.g. name=\"Front Door\" pin=\"1234\". Best-effort: the PIN challenge " +
-            "shape needs live confirmation.",
+        description = "Unlock smart locks (PIN-gated). Uses your saved passcode if pin is omitted — " +
+            "save one first with set_passcode (\"my Google Home passcode is 1122\"). Or pass pin " +
+            "directly. Scope with name/room/type, e.g. name=\"Front Door\". Best-effort: the PIN " +
+            "challenge shape needs live confirmation.",
         inputProperties = selectorProps(
-            "pin" to GhProperty(type = "string", description = "The lock's unlock PIN (required)."),
+            "pin" to GhProperty(type = "string", description = "The lock's unlock PIN. Optional if a passcode was saved via set_passcode."),
         ),
-        requiredInputs = listOf("pin"),
         handler = { args ->
-            val pin = requireString(args, "pin")
+            // Normalize an explicit pin the same way set_passcode does, so "11-22" unlocks rather than
+            // sending an invalid PIN to Foyer. A saved passcode is already normalized.
+            val pin = optString(args, "pin")?.let { normalizePasscode(it) } ?: passcodes?.get()
+                ?: throw IllegalArgumentException(
+                    "No unlock PIN. Save one with set_passcode (e.g. \"my Google Home passcode is 1122\") or pass pin.",
+                )
             applyControl(args, Capability.LOCK, "lock") { d -> setLocked(d, false, pin) }
+        },
+    )
+
+    val setPasscodeTool: GhTool = GhTool(
+        name = "set_passcode",
+        description = "Save the smart-lock unlock passcode (PIN) so unlock can be used without " +
+            "repeating it, e.g. \"my Google Home passcode is 1122\" or \"save my passcode 1122\". " +
+            "Stored securely on-device; only the unlock tool reads it. Never returns the PIN.",
+        inputProperties = mapOf(
+            "passcode" to GhProperty(type = "string", description = "The unlock PIN to save (digits, e.g. 1122)."),
+        ),
+        requiredInputs = listOf("passcode"),
+        handler = { args ->
+            val pin = normalizePasscode(requireString(args, "passcode"))
+            val store = passcodes
+                ?: throw IllegalStateException("Passcode storage isn't available in this build.")
+            store.set(pin)
+            buildJsonObject {
+                put("ok", true)
+                put("saved", true)
+                put("length", pin.length)
+            }
         },
     )
 
@@ -290,6 +321,7 @@ class GoogleHomeMcpServer(private val foyer: GoogleHomeFoyerClient) {
         setMutedTool,
         lockTool,
         unlockTool,
+        setPasscodeTool,
         setThermostatTool,
         mediaControlTool,
         listAutomationsTool,

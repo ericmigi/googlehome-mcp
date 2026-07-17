@@ -13,6 +13,8 @@ import googlehome.mcp.foyer.Home
 import googlehome.mcp.foyer.Room
 import googlehome.mcp.server.GhTool
 import googlehome.mcp.server.GoogleHomeMcpServer
+import googlehome.mcp.server.PasscodeStore
+import googlehome.mcp.server.normalizePasscode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -22,6 +24,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
@@ -74,6 +77,21 @@ private val JSON = Json { ignoreUnknownKeys = true }
 
 private const val KEY_MASTER_TOKEN = "master_token"
 private const val KEY_ANDROID_ID = "android_id"
+private const val KEY_LOCK_PIN = "lock_pin"
+
+/**
+ * The unlock passcode, stored in this MCP's namespaced secret store (`mcp:<installId>:lock_pin`) — the
+ * same secure store as the master token, so no other plugin can read it. Kept independent of the
+ * authenticated facade so saving a PIN never forces a Google sign-in (see [callToolJson]).
+ */
+private object CoreHostPasscodeStore : PasscodeStore {
+    override suspend fun get(): String? =
+        coreHostSecretGet(KEY_LOCK_PIN).await<JsString?>()?.toString()?.takeIf { it.isNotBlank() }
+
+    override suspend fun set(pin: String) {
+        coreHostSecretSet(KEY_LOCK_PIN, pin).await<JsAny?>()
+    }
+}
 
 /**
  * A [GoogleHomeFoyerClient] that has no transport at all: every RPC throws. It exists solely so the
@@ -142,6 +160,7 @@ private suspend fun bootstrap(): GoogleHomeMcp {
             masterToken = storedMaster,
             engine = engine,
             androidId = storedAndroidId ?: MasterToken.DEFAULT_ANDROID_ID,
+            passcodes = CoreHostPasscodeStore,
         )
     }
 
@@ -157,7 +176,7 @@ private suspend fun bootstrap(): GoogleHomeMcp {
     coreHostSecretSet(KEY_MASTER_TOKEN, result.masterToken).await<JsAny?>()
     coreHostLog("info", "Google master token obtained and stored.")
 
-    return GoogleHomeMcp(masterToken = result.masterToken, engine = engine, androidId = androidId)
+    return GoogleHomeMcp(masterToken = result.masterToken, engine = engine, androidId = androidId, passcodes = CoreHostPasscodeStore)
 }
 
 /** A fresh 16-hex-char device id, matching the shape gpsoauth expects (see `MasterTokenBootstrap`). */
@@ -206,7 +225,19 @@ private fun callToolJson(name: String, argsJson: String): Promise<JsAny?> = scop
         } else {
             JSON.parseToJsonElement(argsJson).jsonObject
         }
-        mcp().server().call(name, args).toString().toJsString()
+        // Saving the passcode is pure secret storage — handle it here, before mcp()/bootstrap, so it
+        // never triggers a Google sign-in (a user may save a PIN before ever signing in).
+        if (name == "set_passcode") {
+            val pin = normalizePasscode((args["passcode"] as? JsonPrimitive)?.content.orEmpty())
+            CoreHostPasscodeStore.set(pin)
+            buildJsonObject {
+                put("ok", true)
+                put("saved", true)
+                put("length", pin.length)
+            }.toString().toJsString()
+        } else {
+            mcp().server().call(name, args).toString().toJsString()
+        }
     } catch (e: Exception) {
         buildJsonObject {
             put("ok", false)

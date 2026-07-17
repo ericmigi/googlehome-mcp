@@ -1,6 +1,7 @@
 package googlehome.mcp
 
 import googlehome.mcp.auth.MasterToken
+import googlehome.mcp.server.InMemoryPasscodeStore
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.call
@@ -61,7 +62,12 @@ fun main() {
 
     // Inject the JVM engine into the shared facade. The facade owns all foyer/auth logic;
     // this entrypoint only supplies the platform HTTP engine + the transport.
-    val mcp = GoogleHomeMcp(masterToken = masterToken, engine = OkHttp.create(), androidId = androidId)
+    val mcp = GoogleHomeMcp(
+        masterToken = masterToken,
+        engine = OkHttp.create(),
+        androidId = androidId,
+        passcodes = InMemoryPasscodeStore(),
+    )
 
     val serverTransports = ConcurrentMap<String, SseServerTransport>()
 

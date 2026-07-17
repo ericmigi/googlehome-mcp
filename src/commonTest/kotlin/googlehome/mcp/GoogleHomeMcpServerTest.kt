@@ -1,12 +1,14 @@
 package googlehome.mcp
 
 import googlehome.mcp.foyer.Automation
+import googlehome.mcp.foyer.Capability
 import googlehome.mcp.foyer.Device
 import googlehome.mcp.foyer.DeviceState
 import googlehome.mcp.foyer.GoogleHomeFoyerClient
 import googlehome.mcp.foyer.Home
 import googlehome.mcp.foyer.Room
 import googlehome.mcp.server.GoogleHomeMcpServer
+import googlehome.mcp.server.InMemoryPasscodeStore
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -31,6 +33,7 @@ private class FakeFoyerClient(
     private val states: List<DeviceState> = emptyList(),
 ) : GoogleHomeFoyerClient {
     val setOnOffCalls = mutableListOf<Pair<String, Boolean>>()
+    val setLockedCalls = mutableListOf<Pair<Boolean, String?>>()
 
     override suspend fun getHomeGraph(): Pair<List<Home>, List<Device>> = homes to devices
     override suspend fun listRooms(): List<Room> = emptyList()
@@ -51,8 +54,10 @@ private class FakeFoyerClient(
         DeviceState(id = deviceId, online = true, volumePct = pct)
     override suspend fun setMuted(deviceId: String, agentId: String, partnerDeviceId: String, muted: Boolean) =
         DeviceState(id = deviceId, online = true, muted = muted)
-    override suspend fun setLocked(deviceId: String, agentId: String, partnerDeviceId: String, locked: Boolean, pin: String?) =
-        DeviceState(id = deviceId, online = true, locked = locked)
+    override suspend fun setLocked(deviceId: String, agentId: String, partnerDeviceId: String, locked: Boolean, pin: String?): DeviceState {
+        setLockedCalls += locked to pin
+        return DeviceState(id = deviceId, online = true, locked = locked)
+    }
     override suspend fun setThermostat(deviceId: String, agentId: String, partnerDeviceId: String, setpointC: Double?, mode: String?) =
         DeviceState(id = deviceId, online = true, setpointC = setpointC, thermostatMode = mode)
     override suspend fun mediaCommand(deviceId: String, agentId: String, partnerDeviceId: String, command: String) =
@@ -144,6 +149,60 @@ class GoogleHomeMcpServerTest {
         val server = GoogleHomeMcpServer(FakeFoyerClient())
         assertFailsWith<IllegalArgumentException> {
             server.call("set_device_onoff", buildJsonObject { put("on", JsonPrimitive(true)) })
+        }
+    }
+
+    // --- passcode (saved unlock PIN) -------------------------------------------------------------
+
+    private fun lockDevice() = Device(
+        id = deviceId, name = "Front Door", type = "action.devices.types.LOCK",
+        traits = listOf("action.devices.traits.LockUnlock"), roomName = "Hall",
+        agentId = "a", partnerDeviceId = "p", capabilities = setOf(Capability.LOCK),
+    )
+
+    @Test
+    fun set_passcode_saves_a_normalized_pin() = runTest {
+        val store = InMemoryPasscodeStore()
+        val server = GoogleHomeMcpServer(FakeFoyerClient(), store)
+        val res = server.call("set_passcode", buildJsonObject { put("passcode", JsonPrimitive("11-22")) }).jsonObject
+        assertEquals(true, res["ok"]!!.jsonPrimitive.content.toBoolean())
+        assertEquals("1122", store.get()) // separators stripped
+    }
+
+    @Test
+    fun unlock_uses_the_saved_passcode_when_pin_is_omitted() = runTest {
+        val fake = FakeFoyerClient(devices = listOf(lockDevice()))
+        val server = GoogleHomeMcpServer(fake, InMemoryPasscodeStore(pin = "4466"))
+        server.call("unlock", buildJsonObject { put("name", JsonPrimitive("Front Door")) })
+        assertEquals(listOf<Pair<Boolean, String?>>(false to "4466"), fake.setLockedCalls) // unlock(locked=false) with saved pin
+    }
+
+    @Test
+    fun explicit_pin_overrides_and_is_normalized() = runTest {
+        val fake = FakeFoyerClient(devices = listOf(lockDevice()))
+        val server = GoogleHomeMcpServer(fake, InMemoryPasscodeStore(pin = "4466"))
+        server.call("unlock", buildJsonObject {
+            put("name", JsonPrimitive("Front Door")); put("pin", JsonPrimitive("99-99"))
+        })
+        assertEquals(listOf<Pair<Boolean, String?>>(false to "9999"), fake.setLockedCalls) // separators stripped, overrides saved
+    }
+
+    @Test
+    fun unlock_without_a_pin_or_saved_passcode_fails() = runTest {
+        val server = GoogleHomeMcpServer(FakeFoyerClient(devices = listOf(lockDevice())))
+        assertFailsWith<IllegalArgumentException> {
+            server.call("unlock", buildJsonObject { put("name", JsonPrimitive("Front Door")) })
+        }
+    }
+
+    @Test
+    fun short_or_non_numeric_passcode_is_rejected() = runTest {
+        val server = GoogleHomeMcpServer(FakeFoyerClient(), InMemoryPasscodeStore())
+        assertFailsWith<IllegalArgumentException> {
+            server.call("set_passcode", buildJsonObject { put("passcode", JsonPrimitive("12")) })
+        }
+        assertFailsWith<IllegalArgumentException> {
+            server.call("set_passcode", buildJsonObject { put("passcode", JsonPrimitive("abcd")) })
         }
     }
 }

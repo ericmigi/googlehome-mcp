@@ -6,6 +6,7 @@ import googlehome.mcp.foyer.GoogleHomeFoyerClient
 import googlehome.mcp.foyer.GoogleHomeFoyerClientImpl
 import googlehome.mcp.server.GhTool
 import googlehome.mcp.server.GoogleHomeMcpServer
+import googlehome.mcp.server.PasscodeStore
 import io.ktor.client.engine.HttpClientEngine
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -43,7 +44,10 @@ class GoogleHomeMcp private constructor(
     private val srv: GoogleHomeMcpServer,
 ) {
     /** DI/test constructor: use an already-constructed foyer client. */
-    constructor(foyer: GoogleHomeFoyerClient) : this(GoogleHomeMcpServer(foyer))
+    constructor(
+        foyer: GoogleHomeFoyerClient,
+        passcodes: PasscodeStore? = null,
+    ) : this(GoogleHomeMcpServer(foyer, passcodes))
 
     /**
      * Entrypoint constructor: build the full stack from the master token over [engine].
@@ -58,11 +62,13 @@ class GoogleHomeMcp private constructor(
         masterToken: String,
         engine: HttpClientEngine,
         androidId: String = MasterToken.DEFAULT_ANDROID_ID,
+        passcodes: PasscodeStore? = null,
     ) : this(
         GoogleHomeFoyerClientImpl(
             engine = engine,
             auth = FoyerAuthImpl(MasterToken(masterToken, androidId), engine),
         ),
+        passcodes,
     )
 
     /** The configured server holding the tool definitions + handlers. */
@@ -122,9 +128,13 @@ class GoogleHomeMcp private constructor(
     suspend fun lock(name: String? = null, room: String? = null, type: String? = null): String =
         srv.call("lock", selectorArgs(name, room, type)).toString()
 
-    /** Unlock matching smart locks (PIN-gated — [pin] is required). */
-    suspend fun unlock(pin: String, name: String? = null, room: String? = null, type: String? = null): String =
-        srv.call("unlock", selectorArgs(name, room, type) { put("pin", pin) }).toString()
+    /** Unlock matching smart locks (PIN-gated). Omit [pin] to use the saved passcode ([setPasscode]). */
+    suspend fun unlock(pin: String? = null, name: String? = null, room: String? = null, type: String? = null): String =
+        srv.call("unlock", selectorArgs(name, room, type) { if (!pin.isNullOrBlank()) put("pin", pin) }).toString()
+
+    /** Save the smart-lock unlock passcode so [unlock] can be called without it. */
+    suspend fun setPasscode(passcode: String): String =
+        srv.call("set_passcode", buildJsonObject { put("passcode", JsonPrimitive(passcode)) }).toString()
 
     /** Set thermostat setpoint (Celsius and/or Fahrenheit) and/or mode on matching thermostats. */
     suspend fun setThermostat(
