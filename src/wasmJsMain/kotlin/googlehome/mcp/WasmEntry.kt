@@ -168,5 +168,15 @@ fun listAutomations(): Promise<JsAny?> = scope.promise { mcp().listAutomations()
 @JsExport
 fun runAutomation(name: String): Promise<JsAny?> = scope.promise { mcp().runAutomation(name).toJsString() }
 
-/** Required entrypoint for the `binaries.executable()` wasmJs module. Exports attach on load. */
-fun main() {}
+/**
+ * Required entrypoint for the `binaries.executable()` wasmJs module. Exports attach on load.
+ *
+ * It also installs the CoreApp plugin ABI (`globalThis.mcpPlugin`, see
+ * [googlehome.mcp.plugin.installPlugin]) so the one binary serves both consumers: a plain browser
+ * host calls the `@JsExport`s above after `initGoogleHomeMcp(masterToken)`, while CoreApp's wasm-MCP
+ * runtime talks to `mcpPlugin` and never touches them. Installing is inert on its own — the plugin
+ * only reaches for `coreHost` when a tool is actually called — so the browser build pays nothing.
+ */
+fun main() {
+    googlehome.mcp.plugin.installPlugin()
+}

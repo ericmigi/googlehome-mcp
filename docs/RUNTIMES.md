@@ -17,7 +17,7 @@ be hosted on the JVM. Consequences:
 | Ktor engine injected | `OkHttp.create()` | `Js.create()` |
 | MCP protocol | **Full**: hosts an MCP SDK `Server` over HTTP + SSE | **None**: exports tool functions for an embedding host to wire to its own MCP integration |
 | Master token source | `GOOGLE_MASTER_TOKEN` env var (fail-fast) | passed to `initGoogleHomeMcp(masterToken)` |
-| Tool surface | 13 MCP tools (below) | 13 exported promise-returning functions |
+| Tool surface | 15 MCP tools (below) | 15 exported promise-returning functions |
 
 The JVM hosts the wire protocol; wasmJs exports the same operations as plain async functions so an
 embedder (e.g. a small JS shim) can bridge them to whatever MCP transport it already runs.
@@ -40,6 +40,11 @@ capable match, returning a per-device `{id,name,ok,state|error}` array):
 - `lock` / `unlock(pin)`, unlock is PIN-gated
 - `set_thermostat(temperature_c? / temperature_f? / mode?)`, best-effort, needs live confirm
 - `media_control(command)`, NEXT/PAUSE/PREVIOUS/RESUME/STOP, best-effort, needs live confirm
+
+Automations:
+
+- `list_automations` (read-only), `run_automation(name)` — starts an EXISTING manually-runnable
+  routine; it never creates or deletes one.
 
 No tool creates or deletes a device, room, or structure.
 
@@ -90,6 +95,62 @@ Full control surface (all return `Promise<string>` of the `{id,name,ok,state|err
 - `getDeviceState` takes a comma-separated id string (kept simple to avoid JS-array interop).
 - Control is **general** (any device via selectors) but strictly control of existing devices, there
   is no add/create or remove/delete export.
+
+## CoreApp plugin bundle, `src/wasmJsMain/kotlin/googlehome/mcp/plugin/`
+
+A third consumer of the same wasmJs binary: CoreApp's sandboxed wasm-MCP runtime (see its
+`docs/wasm-mcp/ARCHITECTURE.md`). Same facade, same tools, same commonMain — only the two edges move:
+
+| | wasmJs browser (`WasmEntry.kt`) | CoreApp plugin (`plugin/`) |
+|---|---|---|
+| Ktor engine | `Js.create()` (ambient `fetch`) | `CoreHostEngine` → `coreHost.httpFetch`, allow-listed |
+| Credentials | caller passes `initGoogleHomeMcp(masterToken)` | `coreHost.secretGet` / `coreHost.browserAuth` |
+| Surface | `@JsExport` functions | `globalThis.mcpPlugin` (`listTools`/`callTool`/`getContext`) |
+
+Both are installed by the same `main()`, so one binary serves both; installing `mcpPlugin` is inert
+until a tool is called.
+
+- **`CoreHost.kt`** — bindings for the host ABI (`httpFetch`/`secretGet`/`secretSet`/`browserAuth`/
+  `log`). These are the module's *only* capabilities.
+- **`CoreHostEngine.kt`** — a Ktor `HttpClientEngine` over `coreHost.httpFetch`. Because the facade
+  already takes an **injected** engine, this constructor swap puts every byte of egress behind the
+  manifest's `network.allow` without touching protocol logic.
+- **`PluginEntry.kt`** — installs `globalThis.mcpPlugin`; bootstraps credentials on first tool call
+  (`master_token` + `android_id` from `secretGet`; if absent, `browserAuth()` runs the
+  manifest-pinned EmbeddedSetup capture and the **existing** `GpsOAuthClient.exchangeOAuthToken`
+  `ac2dm` exchange runs over `CoreHostEngine`, then both are stored). Tokens are never logged or
+  returned.
+
+### Building the bundle
+
+```bash
+./gradlew packageWasmBundle     # -> build/bundle/{manifest.json, module.wasm, glue.js}
+```
+
+`bundle/manifest.json` (network allow-list + pinned cookie-capture auth) is the source of truth for
+what the user consents to at install; `bundle/prelude.js` is prepended to the generated glue.
+
+### What the host must provide
+
+The bundle is loaded by evaluating `glue.js` as a **classic script**, then calling the plugin ABI's
+entry point `globalThis.mcpPluginInit(<module.wasm bytes>)`, which resolves once `mcpPlugin` is live.
+
+Before that, the host's engine must already have:
+
+- **`coreHost.*`** — the host ABI.
+- **`setTimeout` / `clearTimeout`** — kotlinx-coroutines' `Dispatchers.Default` needs a timer, and a
+  sandbox cannot invent an event loop. Bare JSC has no timers (they are WebKit APIs, not
+  ECMAScript); libpebble3 already solves exactly this for PKJS in `JSTimeout.js` / `JSTimeout.kt`.
+
+`TextDecoder` is *not* a host requirement: Ktor's wasmJs charset path needs it, but decoding bytes is
+pure computation granting no capability, so `bundle/prelude.js` ships a UTF-8 shim (guarded, so it is
+inert on a WebView host). Without it every `bodyAsText()` fails as a bare `NullPointerException`.
+
+Why `packageWasmBundle` rewrites rather than copies the glue: Kotlin/Wasm's emitted loader sniffs for
+Node/Deno/browser and loads the wasm via `fs` or `fetch(import.meta.url)`. The sandbox is none of
+those and evaluates a classic script, so `import.meta` is a *parse* error even on dead branches. The
+task pins the loader to its synchronous bytes-in path and asserts every rewrite, failing loudly if a
+Kotlin upgrade changes the generated shape.
 
 ## Facade seam both entrypoints require (owned by the mcp/server agent)
 

@@ -75,3 +75,157 @@ kotlin {
         }
     }
 }
+
+// -------------------------------------------------------------------------------------------------
+// CoreApp wasm-MCP plugin bundle
+// -------------------------------------------------------------------------------------------------
+
+/**
+ * Assembles `build/bundle/{manifest.json, module.wasm, glue.js}` — the bundle format CoreApp's
+ * wasm-MCP runtime loads (see its `docs/wasm-mcp/ARCHITECTURE.md`, decision D3).
+ *
+ * ## Why this is not a plain copy
+ *
+ * Kotlin/Wasm emits `<name>.wasm` plus two ES modules: `<name>.uninstantiated.mjs` (the real glue —
+ * `js_code` imports + a loader) and `<name>.mjs` (a thin entry that awaits `instantiate()` and
+ * re-exports). That loader sniffs its environment and loads the wasm via Node `fs`, `Deno`, or
+ * browser `fetch(import.meta.url)`.
+ *
+ * The plugin host is **none of those**. Per decision D1 the module runs in a bare in-process
+ * `JSContext` (iOS) or a `WebView` (Android), which by design has no `fetch`, no fs, and no ambient
+ * capability at all — that is the sandbox. It also evaluates a classic script, not an ES module, so
+ * the `import.meta` tokens are a *parse* error even on branches that never run.
+ *
+ * So the task rewrites the generated glue into a self-contained classic script that takes the wasm
+ * bytes from the host instead of fetching them:
+ *
+ * 1. `export async function instantiate` -> a local function (no ESM export).
+ * 2. The environment sniff -> pinned to the "standalone JS VM" branch, which is the only one that
+ *    builds the module **synchronously from bytes** (`new WebAssembly.Module(buf)`) with no I/O.
+ * 3. That branch's `read(wasmFilePath, 'binary')` -> the bytes the host hands us.
+ * 4. `import.meta` -> an inert stand-in, so the dead Node/Deno/browser branches merely parse.
+ *
+ * Each rewrite is asserted: if a Kotlin upgrade changes the generated glue, this task **fails loudly**
+ * rather than silently shipping a bundle that cannot instantiate on a device.
+ *
+ * The host's contract with the result is the plugin ABI: evaluate `glue.js`, then call
+ * `globalThis.mcpPluginInit(<module.wasm bytes>)`. That installs `globalThis.mcpPlugin`.
+ */
+val packageWasmBundle by tasks.registering {
+    group = "build"
+    description = "Assemble the CoreApp wasm-MCP plugin bundle (manifest.json + module.wasm + glue.js) in build/bundle."
+
+    val optimizeTask = tasks.named("compileProductionExecutableKotlinWasmJsOptimize")
+    dependsOn(optimizeTask)
+
+    val emittedDir = layout.buildDirectory.dir("compileSync/wasmJs/main/productionExecutable/optimized")
+    val manifestFile = layout.projectDirectory.file("bundle/manifest.json")
+    val preludeFile = layout.projectDirectory.file("bundle/prelude.js")
+    val outDir = layout.buildDirectory.dir("bundle")
+
+    inputs.dir(emittedDir)
+    inputs.file(manifestFile)
+    inputs.file(preludeFile)
+    outputs.dir(outDir)
+
+    doLast {
+        val src = emittedDir.get().asFile
+        val wasm = src.listFiles()?.singleOrNull { it.name.endsWith(".wasm") }
+            ?: error("Expected exactly one .wasm in $src, found: ${src.list()?.joinToString()}")
+        val glueSrc = src.listFiles()?.singleOrNull { it.name.endsWith(".uninstantiated.mjs") }
+            ?: error("Expected exactly one .uninstantiated.mjs in $src, found: ${src.list()?.joinToString()}")
+
+        val out = outDir.get().asFile
+        out.mkdirs()
+
+        wasm.copyTo(out.resolve("module.wasm"), overwrite = true)
+        manifestFile.asFile.copyTo(out.resolve("manifest.json"), overwrite = true)
+
+        var glue = glueSrc.readText()
+
+        /** Applies one required rewrite, failing the build if the generated glue no longer matches. */
+        fun rewrite(what: String, find: Regex, replaceWith: String) {
+            val hits = find.findAll(glue).count()
+            if (hits == 0) {
+                error(
+                    "packageWasmBundle: could not apply rewrite '$what' — pattern <${find.pattern}> not found in " +
+                        "${glueSrc.name}. The Kotlin/Wasm glue changed shape; update this task (build.gradle.kts) " +
+                        "before shipping a bundle.",
+                )
+            }
+            glue = find.replace(glue, replaceWith)
+        }
+
+        rewrite(
+            "un-export instantiate",
+            Regex("""export\s+async\s+function\s+instantiate\("""),
+            "async function instantiate(",
+        )
+        rewrite(
+            "pin the env sniff to the bytes-in path",
+            Regex(
+                """const isNodeJs = .*?\n\s*const isDeno = .*?\n\s*const isStandaloneJsVM =[\s\S]*?\n\s*const isBrowser = .*?;""",
+            ),
+            "const isNodeJs = false, isDeno = false, isStandaloneJsVM = true, isBrowser = false;",
+        )
+        rewrite(
+            "take wasm bytes from the host",
+            Regex("""const wasmBuffer = read\(wasmFilePath, 'binary'\);"""),
+            "const wasmBuffer = globalThis.__googlehomeWasmBytes;",
+        )
+        rewrite(
+            "neutralise import.meta for classic-script parsing",
+            Regex("""import\.meta"""),
+            "globalThis.__googlehomeImportMeta",
+        )
+
+        val prelude = """
+            |// GENERATED — do not edit. Assembled by :packageWasmBundle from ${glueSrc.name}.
+            |// Bare JSC / WebView sandbox: no fetch, no fs, no ES modules. The host evaluates this
+            |// script, then calls the plugin ABI's entry point:
+            |//
+            |//   globalThis.mcpPluginInit(wasmBytes) -> Promise, resolves once globalThis.mcpPlugin
+            |//                                          is live. See CoreApp's
+            |//                                          docs/wasm-mcp/ARCHITECTURE.md "Plugin ABI".
+            |//
+            |// REQUIRED OF THE HOST: setTimeout/clearTimeout must already exist in the engine —
+            |// kotlinx-coroutines' Dispatchers.Default needs them and a sandbox cannot invent a
+            |// timer. See bundle/prelude.js, and libpebble3's JSTimeout.kt for the pattern.
+            |
+        """.trimMargin() + preludeFile.asFile.readText() + """
+            |
+            |(function (global) {
+            |'use strict';
+            |global.__googlehomeImportMeta = { url: '', resolve: function (p) { return p; } };
+            |
+        """.trimMargin()
+
+        val epilogue = """
+            |
+            |/**
+            | * The plugin ABI entry point. The host evaluates this file, then calls this with the
+            | * bundle's module.wasm; we instantiate it and install globalThis.mcpPlugin.
+            | *
+            | * @param wasmBytes {ArrayBuffer|Uint8Array} the bundle's module.wasm.
+            | * @returns {Promise<void>} resolves once globalThis.mcpPlugin is live.
+            | */
+            |global.mcpPluginInit = async function (wasmBytes) {
+            |    if (!wasmBytes) throw new Error('mcpPluginInit: module.wasm bytes are required.');
+            |    global.__googlehomeWasmBytes = wasmBytes;
+            |    // runInitializer=true runs Kotlin's main(), which installs globalThis.mcpPlugin.
+            |    await instantiate({}, true);
+            |    delete global.__googlehomeWasmBytes;
+            |    if (!global.mcpPlugin) throw new Error('mcpPluginInit: mcpPlugin was not installed.');
+            |};
+            |})(globalThis);
+            |
+        """.trimMargin()
+
+        out.resolve("glue.js").writeText(prelude + glue + epilogue)
+
+        logger.lifecycle("wasm-MCP bundle -> ${out.absolutePath}")
+        out.listFiles()?.sortedBy { it.name }?.forEach {
+            logger.lifecycle("  ${it.name} (${it.length()} bytes)")
+        }
+    }
+}
