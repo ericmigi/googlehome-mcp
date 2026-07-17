@@ -1,0 +1,18 @@
+.gradle/
+build/
+kotlin-js-store/
+*.log
+.DS_Store
+.idea/
+local.properties
+
+# Raw captures contain real personal data — keep local, never commit
+captures/
+
+# gstack browser session state (local only, contains tokens)
+.gstack/
+
+.kotlin/
+
+token.env
+*.env

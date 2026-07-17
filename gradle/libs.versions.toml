@@ -1,0 +1,48 @@
+[versions]
+# Proven-compatible set (already resolved in the local Gradle cache via CoreApp):
+# Kotlin 2.3.10 + Gradle 8.14.4 + Ktor 3.4.0 + coroutines 1.10.2 + serialization 1.10.0.
+# All of ktor-client-core/js, kotlinx-serialization-json and kotlinx-coroutines-core
+# publish wasmJs artifacts at these versions. The MCP SDK does NOT (see note below).
+kotlin = "2.3.10"
+coroutines = "1.10.2"
+serialization = "1.10.0"
+ktor = "3.4.0"
+# JVM-only: drives a real Chrome to scrape the EmbeddedSetup oauth_token (bootstrap tool).
+playwright = "1.49.0"
+# io.modelcontextprotocol:kotlin-sdk 0.8.3 publishes ONLY jvm / js(IR) / iosArm64 /
+# iosSimulatorArm64 variants — there is NO wasmJs artifact. It is therefore wired as a
+# JVM-only dependency; commonMain uses a thin internal tool abstraction instead.
+mcp = "0.8.3"
+
+[libraries]
+# ---- common (must have wasmJs artifacts) ----
+kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutines" }
+
+# ---- test-only: MockEngine (publishes wasmJs + jvm artifacts) ----
+ktor-client-mock = { module = "io.ktor:ktor-client-mock", version.ref = "ktor" }
+
+ktor-client-core = { module = "io.ktor:ktor-client-core", version.ref = "ktor" }
+ktor-client-content-negotiation = { module = "io.ktor:ktor-client-content-negotiation", version.ref = "ktor" }
+ktor-serialization-kotlinx-json = { module = "io.ktor:ktor-serialization-kotlinx-json", version.ref = "ktor" }
+
+# ---- wasmJs engine ----
+ktor-client-js = { module = "io.ktor:ktor-client-js", version.ref = "ktor" }
+
+# ---- jvm engine + webserver ----
+ktor-client-okhttp = { module = "io.ktor:ktor-client-okhttp", version.ref = "ktor" }
+ktor-server-core = { module = "io.ktor:ktor-server-core", version.ref = "ktor" }
+ktor-server-cio = { module = "io.ktor:ktor-server-cio", version.ref = "ktor" }
+ktor-server-sse = { module = "io.ktor:ktor-server-sse", version.ref = "ktor" }
+
+# ---- MCP SDK (JVM-only; no wasmJs artifact in 0.8.3) ----
+mcp-kotlin-sdk-core = { module = "io.modelcontextprotocol:kotlin-sdk-core", version.ref = "mcp" }
+mcp-kotlin-sdk-server = { module = "io.modelcontextprotocol:kotlin-sdk-server", version.ref = "mcp" }
+
+# ---- master-token bootstrap (JVM-only browser scrape) ----
+playwright = { module = "com.microsoft.playwright:playwright", version.ref = "playwright" }
+
+[plugins]
+kotlin-multiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
