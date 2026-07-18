@@ -1,19 +1,7 @@
 package googlehome.mcp.foyer
 
 import googlehome.mcp.auth.FoyerAuth
-import io.ktor.client.HttpClient
 import kotlin.math.roundToInt
-import io.ktor.client.engine.HttpClientEngine
-import io.ktor.client.request.header
-import io.ktor.client.request.post
-import io.ktor.client.request.setBody
-import io.ktor.client.statement.HttpResponse
-import io.ktor.client.statement.bodyAsText
-import io.ktor.http.ContentType
-import io.ktor.http.HttpHeaders
-import io.ktor.http.HttpStatusCode
-import io.ktor.http.content.TextContent
-import io.ktor.http.isSuccess
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -22,29 +10,32 @@ import kotlinx.serialization.json.JsonPrimitive
 /** Raised when foyer-pa returns a non-success HTTP status (auth failure, quota, server error). */
 class FoyerHttpException(val status: Int, message: String) : Exception(message)
 
+/** A foyer-pa HTTP reply, reduced to what [FoyerRpcClient] needs (status + text body). */
+class FoyerResponse(val status: Int, val body: String)
+
 /**
- * [GoogleHomeFoyerClient] over the real foyer-pa HTTP endpoint.
- *
- * Every call POSTs a positional `application/json+protobuf` array (built by [FoyerCodec]) to
- * `<BASE>/<Service>/<Method>` with the fixed header set the web app / Android app send, except the
- * cookie-derived `SAPISIDHASH` is replaced by `Authorization: Bearer <token>` minted from the
- * master token via [auth]. `X-Goog-Api-Key`, `X-Server-Token` and `x-foyer-client-environment` are
- * verified-optional/harmful and intentionally omitted (see docs/PROTOCOL.md §2).
- *
- * The client is `commonMain`-only: it takes an injected [HttpClientEngine] so the same code runs on
- * wasmJs (ktor-client-js) and jvm (okhttp/cio). No platform engine is referenced here.
+ * The transport under [FoyerRpcClient]: one POST of a `application/json+protobuf` [bodyJson] to [url]
+ * with `Authorization: Bearer <bearer>`. Ktor supplies one impl (`GoogleHomeFoyerClientImpl`), the
+ * wasmWasi plugin another (`host_http_fetch`) — the RPC/retry/parse logic below is shared by both.
+ */
+fun interface FoyerHttpTransport {
+    suspend fun post(url: String, bodyJson: String, bearer: String): FoyerResponse
+}
+
+/**
+ * [GoogleHomeFoyerClient] over an injected [FoyerHttpTransport], holding all the protocol logic that
+ * used to live in `GoogleHomeFoyerClientImpl`: build a positional `application/json+protobuf` array
+ * (via [FoyerCodec]), POST it to `<BASE>/<Service>/<Method>`, mint the bearer from [auth] (replacing
+ * the web app's cookie `SAPISIDHASH`), and on a 401/403 [FoyerAuth.invalidate] + retry once.
  *
  * **Safety:** control is general (no device-id allowlist), but strictly *control of existing
- * devices* — there is no add/create or remove/delete path here, and none is ever called. Each control
- * method takes the already-resolved `(deviceId, agentId, partnerDeviceId)` from the caller and issues
- * exactly one `UpdateTraits`; it never re-fetches the home graph.
+ * devices* — there is no add/create or remove/delete path here. Each control method takes the
+ * already-resolved `(deviceId, agentId, partnerDeviceId)` and issues exactly one `UpdateTraits`.
  */
-class GoogleHomeFoyerClientImpl(
-    engine: HttpClientEngine,
+class FoyerRpcClient(
+    private val transport: FoyerHttpTransport,
     private val auth: FoyerAuth,
 ) : GoogleHomeFoyerClient {
-
-    private val client = HttpClient(engine)
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -192,46 +183,34 @@ class GoogleHomeFoyerClientImpl(
     /**
      * POSTs [body] to `<BASE><service>/<method>` with foyer auth headers and returns the parsed
      * reply. On an auth rejection (401/403) it [FoyerAuth.invalidate]s the cached bearer — which
-     * also advances scope negotiation — and retries **once** with a freshly minted token; this is
-     * the layer that decides whether a mintable scope is actually accepted by foyer-pa. Any other
-     * non-2xx status throws [FoyerHttpException] instead of feeding an HTML error page to the JSON
-     * parser.
+     * also advances scope negotiation — and retries **once** with a freshly minted token. Any other
+     * non-2xx status throws [FoyerHttpException] instead of feeding an HTML error page to the parser.
      */
     private suspend fun rpc(service: String, method: String, body: JsonArray): JsonElement {
         val url = "$BASE$service/$method"
 
-        var response = send(url, body, auth.bearer())
-        if (response.status == HttpStatusCode.Unauthorized || response.status == HttpStatusCode.Forbidden) {
+        var response = transport.post(url, body.toString(), auth.bearer())
+        if (response.status == 401 || response.status == 403) {
             auth.invalidate()
-            response = send(url, body, auth.bearer())
+            response = transport.post(url, body.toString(), auth.bearer())
         }
-        if (!response.status.isSuccess()) {
-            val snippet = response.bodyAsText().take(300)
-            throw FoyerHttpException(response.status.value, "foyer $service/$method -> HTTP ${response.status.value}: $snippet")
+        if (response.status !in 200..299) {
+            val snippet = response.body.take(300)
+            throw FoyerHttpException(response.status, "foyer $service/$method -> HTTP ${response.status}: $snippet")
         }
-        return json.parseToJsonElement(stripXssiPrefix(response.bodyAsText()))
+        return json.parseToJsonElement(stripXssiPrefix(response.body))
     }
-
-    private suspend fun send(url: String, body: JsonArray, bearer: String): HttpResponse =
-        client.post(url) {
-            header(HttpHeaders.Authorization, "Bearer $bearer")
-            // NO X-Goog-Api-Key: verified live (2026-07-16). The web app pairs its api key with
-            // cookie SAPISIDHASH; our Bearer is minted for the Android Home app's project, so sending
-            // the web key makes foyer reject the call with HTTP 400 "API Key and the authentication
-            // credential are from different projects". A Bearer alone identifies the project.
-            header("X-User-Agent", "grpc-web-javascript/0.1")
-            setBody(TextContent(body.toString(), CONTENT_TYPE))
-        }
 
     companion object {
         /** foyer-pa `$rpc` base — service + method are appended. */
-        internal const val BASE =
+        const val BASE =
             "https://googlehomefoyer-pa.clients6.google.com/\$rpc/google.internal.home.foyer.v1."
-        internal const val STRUCTURES_SERVICE = "StructuresService"
-        internal const val HOME_CONTROL_SERVICE = "HomeControlService"
-        internal const val AUTOMATION_SERVICE = "AutomationService"
+        const val HOME_CONTROL_SERVICE = "HomeControlService"
+        const val STRUCTURES_SERVICE = "StructuresService"
+        const val AUTOMATION_SERVICE = "AutomationService"
 
-        private val CONTENT_TYPE = ContentType.parse("application/json+protobuf")
+        /** foyer speaks `application/json+protobuf` (JSON text); transports set this Content-Type. */
+        const val CONTENT_TYPE = "application/json+protobuf"
 
         /** `GetHomeGraph` takes an empty positional array. */
         private val EMPTY_BODY = JsonArray(emptyList())
@@ -241,7 +220,7 @@ class GoogleHomeFoyerClientImpl(
          * endpoints prepend to JSON responses. The captured foyer bodies had no such prefix, but
          * stripping one defensively costs nothing and avoids a parse failure if the live wire adds it.
          */
-        internal fun stripXssiPrefix(body: String): String {
+        fun stripXssiPrefix(body: String): String {
             val trimmed = body.trimStart()
             if (trimmed.startsWith(")]}'")) {
                 return trimmed.removePrefix(")]}'").trimStart('\r', '\n')

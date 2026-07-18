@@ -1,6 +1,5 @@
 package googlehome.mcp.auth
 
-import io.ktor.client.engine.HttpClientEngine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.time.Clock
@@ -47,9 +46,9 @@ object FoyerAuthConfig {
  * token is cached for [fallbackTtlSeconds] (~55 min, safely under the typical ~1 h lifetime).
  */
 @OptIn(ExperimentalTime::class)
-class FoyerAuthImpl internal constructor(
+class FoyerAuthImpl(
     private val masterToken: MasterToken,
-    private val oauth: GpsOAuthClient,
+    private val oauth: GpsOAuth,
     private val scopes: List<String> = FoyerAuthConfig.SCOPE_CANDIDATES,
     private val app: String = FoyerAuthConfig.APP,
     private val clientSig: String = FoyerAuthConfig.CLIENT_SIG,
@@ -57,10 +56,6 @@ class FoyerAuthImpl internal constructor(
     private val expirySkewSeconds: Long = 60,
     private val nowEpochSeconds: () -> Long = { Clock.System.now().epochSeconds },
 ) : FoyerAuth {
-
-    /** Convenience constructor: injects only the Ktor engine, using the community-default config. */
-    constructor(masterToken: MasterToken, engine: HttpClientEngine) :
-        this(masterToken, GpsOAuthClient(engine))
 
     private val mutex = Mutex()
     private var cachedToken: String? = null

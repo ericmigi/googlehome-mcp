@@ -40,39 +40,82 @@ kotlin {
         binaries.executable()
     }
 
+    // JS-free reactor module for the `chasm` host. Ktor has no wasmWasi artifact, so this target sees
+    // ONLY the Ktor-free `commonMain` core; its transport is the `host_http_fetch` wasm import.
+    @OptIn(ExperimentalWasmDsl::class)
+    wasmWasi {
+        nodejs()
+        binaries.executable()
+    }
+
     sourceSets {
-        commonMain.dependencies {
-            // Kept minimal so the wasmJs target actually compiles.
-            implementation(libs.ktor.client.core)
-            implementation(libs.ktor.client.content.negotiation)
-            implementation(libs.ktor.serialization.kotlinx.json)
-            implementation(libs.kotlinx.serialization.json)
-            implementation(libs.kotlinx.coroutines.core)
-            // NOTE: the MCP SDK is intentionally absent here — 0.8.3 has no wasmJs
-            // artifact. commonMain codes against a thin internal tool abstraction
-            // (server agent) and the real MCP server is wired in jvmMain.
+        val commonMain by getting {
+            dependencies {
+                // Ktor-FREE pure core only — both wasmJs (via ktorMain) and wasmWasi build against this.
+                // (These two publish wasmWasi artifacts; Ktor does not, which is the whole reason for
+                // the ktorMain split below.)
+                implementation(libs.kotlinx.serialization.json)
+                implementation(libs.kotlinx.coroutines.core)
+                // NOTE: the MCP SDK is intentionally absent — 0.8.3 has no wasmJs/wasmWasi artifact.
+                // commonMain codes against a thin internal tool abstraction; the real MCP server is jvm.
+            }
         }
-        commonTest.dependencies {
-            implementation(kotlin("test"))
-            implementation(libs.kotlinx.coroutines.test)
-            // MockEngine, for asserting request shape without real network calls.
-            implementation(libs.ktor.client.mock)
+        val commonTest by getting {
+            dependencies {
+                implementation(kotlin("test"))
+                implementation(libs.kotlinx.coroutines.test)
+            }
         }
-        jvmMain.dependencies {
-            implementation(libs.ktor.client.okhttp)
-            // ktor webserver (SSE transport for MCP over HTTP)
-            implementation(libs.ktor.server.core)
-            implementation(libs.ktor.server.cio)
-            implementation(libs.ktor.server.sse)
-            // MCP SDK — JVM-only (no wasmJs artifact in 0.8.3).
-            implementation(libs.mcp.kotlin.sdk.core)
-            implementation(libs.mcp.kotlin.sdk.server)
-            // Master-token bootstrap: drives a real Chrome to scrape the EmbeddedSetup oauth_token.
-            implementation(libs.playwright)
+
+        // Intermediate set holding every Ktor impl. jvmMain + wasmJsMain depend on it; wasmWasiMain does
+        // NOT, so wasmWasi never sees Ktor.
+        val ktorMain by creating {
+            dependsOn(commonMain)
+            dependencies {
+                implementation(libs.ktor.client.core)
+                implementation(libs.ktor.client.content.negotiation)
+                implementation(libs.ktor.serialization.kotlinx.json)
+            }
         }
-        wasmJsMain.dependencies {
-            implementation(libs.ktor.client.js)
+        // The Ktor MockEngine tests (foyer client, gpsoauth, foyer auth) live here — not commonTest —
+        // so they never compile for the Ktor-free wasmWasi target.
+        val ktorTest by creating {
+            dependsOn(commonTest)
+            dependencies {
+                implementation(libs.ktor.client.mock)
+            }
         }
+
+        // Default hierarchy template is disabled (see gradle.properties), so every target's main/test
+        // set explicitly declares its parent here.
+        val jvmMain by getting {
+            dependsOn(ktorMain)
+            dependencies {
+                implementation(libs.ktor.client.okhttp)
+                // ktor webserver (SSE transport for MCP over HTTP)
+                implementation(libs.ktor.server.core)
+                implementation(libs.ktor.server.cio)
+                implementation(libs.ktor.server.sse)
+                // MCP SDK — JVM-only (no wasmJs artifact in 0.8.3).
+                implementation(libs.mcp.kotlin.sdk.core)
+                implementation(libs.mcp.kotlin.sdk.server)
+                // Master-token bootstrap: drives a real Chrome to scrape the EmbeddedSetup oauth_token.
+                implementation(libs.playwright)
+            }
+        }
+        val jvmTest by getting { dependsOn(ktorTest) }
+
+        val wasmJsMain by getting {
+            dependsOn(ktorMain)
+            dependencies {
+                implementation(libs.ktor.client.js)
+            }
+        }
+        val wasmJsTest by getting { dependsOn(ktorTest) }
+
+        // wasmWasiMain depends on commonMain ONLY (never ktorMain) — Ktor-free by construction.
+        val wasmWasiMain by getting { dependsOn(commonMain) }
+        val wasmWasiTest by getting { dependsOn(commonTest) }
     }
 }
 
@@ -224,6 +267,55 @@ val packageWasmBundle by tasks.registering {
         out.resolve("glue.js").writeText(prelude + glue + epilogue)
 
         logger.lifecycle("wasm-MCP bundle -> ${out.absolutePath}")
+        out.listFiles()?.sortedBy { it.name }?.forEach {
+            logger.lifecycle("  ${it.name} (${it.length()} bytes)")
+        }
+    }
+}
+
+// -------------------------------------------------------------------------------------------------
+// Chasm wasm-MCP plugin bundle (JS-free)
+// -------------------------------------------------------------------------------------------------
+
+/**
+ * Assembles `build/chasm-bundle/{manifest.json, module.wasm}` — the bundle the `chasm` host loads.
+ *
+ * Unlike [packageWasmBundle], there is **no glue.js**: chasm instantiates the `wasmWasi` reactor
+ * module directly and binds the `env::host_*` imports to Kotlin lambdas (see scratchpad/chasm-abi.md),
+ * so the only artifacts are the optimized `module.wasm` and the manifest. The `entry` field (which
+ * points at glue.js for the JS runtime) is stripped, since chasm has no JS entry point.
+ */
+val packageChasmBundle by tasks.registering {
+    group = "build"
+    description = "Assemble the chasm wasm-MCP plugin bundle (manifest.json + module.wasm) in build/chasm-bundle."
+
+    val optimizeTask = tasks.named("compileProductionExecutableKotlinWasmWasiOptimize")
+    dependsOn(optimizeTask)
+
+    val emittedDir = layout.buildDirectory.dir("compileSync/wasmWasi/main/productionExecutable/optimized")
+    val manifestFile = layout.projectDirectory.file("bundle/manifest.json")
+    val outDir = layout.buildDirectory.dir("chasm-bundle")
+
+    inputs.dir(emittedDir)
+    inputs.file(manifestFile)
+    outputs.dir(outDir)
+
+    doLast {
+        val src = emittedDir.get().asFile
+        val wasm = src.listFiles()?.singleOrNull { it.name.endsWith(".wasm") }
+            ?: error("Expected exactly one .wasm in $src, found: ${src.list()?.joinToString()}")
+
+        val out = outDir.get().asFile
+        out.mkdirs()
+
+        wasm.copyTo(out.resolve("module.wasm"), overwrite = true)
+
+        // Same manifest as the JS bundle, minus the `entry` (glue.js) line — chasm has no JS entry.
+        val manifest = manifestFile.asFile.readText()
+            .replace(Regex(""" *"entry"\s*:\s*"[^"]*",?\r?\n"""), "")
+        out.resolve("manifest.json").writeText(manifest)
+
+        logger.lifecycle("chasm wasm-MCP bundle -> ${out.absolutePath}")
         out.listFiles()?.sortedBy { it.name }?.forEach {
             logger.lifecycle("  ${it.name} (${it.length()} bytes)")
         }

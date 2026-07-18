@@ -1,6 +1,7 @@
 package googlehome.mcp
 
 import googlehome.mcp.auth.FoyerAuthImpl
+import googlehome.mcp.auth.GpsOAuthClient
 import googlehome.mcp.auth.MasterToken
 import googlehome.mcp.foyer.GoogleHomeFoyerClient
 import googlehome.mcp.foyer.GoogleHomeFoyerClientImpl
@@ -66,7 +67,7 @@ class GoogleHomeMcp private constructor(
     ) : this(
         GoogleHomeFoyerClientImpl(
             engine = engine,
-            auth = FoyerAuthImpl(MasterToken(masterToken, androidId), engine),
+            auth = FoyerAuthImpl(MasterToken(masterToken, androidId), GpsOAuthClient(engine)),
         ),
         passcodes,
     )

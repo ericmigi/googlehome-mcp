@@ -22,7 +22,7 @@ class GpsOAuthClientTest {
     @Test
     fun parsesKeyValueResponseIncludingValuesWithEquals() {
         val body = "Auth=ya29.abc==\nExpiry=1516883617\nservices=homegraph\n\n"
-        val map = GpsOAuthClient.parseAuthResponse(body)
+        val map = GpsOAuthCodec.parseAuthResponse(body)
 
         assertEquals("ya29.abc==", map["Auth"])
         assertEquals("1516883617", map["Expiry"])
@@ -33,7 +33,7 @@ class GpsOAuthClientTest {
     @Test
     fun parsesErrorResponse() {
         val body = "Error=BadAuthentication\nErrorDetail=InvalidSecondFactor\n"
-        val map = GpsOAuthClient.parseAuthResponse(body)
+        val map = GpsOAuthCodec.parseAuthResponse(body)
 
         assertEquals("BadAuthentication", map["Error"])
         assertEquals("InvalidSecondFactor", map["ErrorDetail"])
@@ -43,7 +43,7 @@ class GpsOAuthClientTest {
 
     @Test
     fun buildAuthTokenFormHasExpectedFields() {
-        val form = GpsOAuthClient.buildAuthTokenForm(
+        val form = GpsOAuthCodec.buildAuthTokenForm(
             masterToken = "aas_et/master123",
             androidId = "0011223344556677",
             service = "oauth2:https://www.googleapis.com/auth/homegraph",
@@ -84,7 +84,7 @@ class GpsOAuthClientTest {
         assertEquals(1516883617L, token.expiryEpochSeconds)
 
         val request = assertNotNull(captured)
-        assertEquals(GpsOAuthClient.AUTH_URL, request.url.toString())
+        assertEquals(GpsOAuthCodec.AUTH_URL, request.url.toString())
         assertEquals(HttpMethod.Post, request.method)
         assertEquals("GoogleAuth/1.4", request.headers[HttpHeaders.UserAgent])
         assertEquals("identity", request.headers[HttpHeaders.AcceptEncoding])
@@ -94,7 +94,7 @@ class GpsOAuthClientTest {
         assertEquals("com.google.android.apps.chromecast.app", form["app"])
         // scope contains colons + slashes and must round-trip through form encoding intact.
         assertEquals("oauth2:https://www.googleapis.com/auth/homegraph", form["service"])
-        assertEquals(GpsOAuthClient.DEFAULT_ANDROID_ID, form["androidId"])
+        assertEquals(GpsOAuthCodec.DEFAULT_ANDROID_ID, form["androidId"])
     }
 
     @Test
@@ -117,7 +117,7 @@ class GpsOAuthClientTest {
 
     @Test
     fun buildExchangeFormHasExpectedFields() {
-        val form = GpsOAuthClient.buildExchangeForm(
+        val form = GpsOAuthCodec.buildExchangeForm(
             oauthToken = "oauth2_4/abcDEF-token",
             androidId = "0011223344556677",
         )
@@ -126,8 +126,8 @@ class GpsOAuthClientTest {
         assertEquals("ac2dm", form["service"])
         assertEquals("1", form["add_account"])
         assertEquals("1", form["ACCESS_TOKEN"])
-        assertEquals(GpsOAuthClient.GMS_CLIENT_SIG, form["client_sig"])
-        assertEquals(GpsOAuthClient.GMS_CLIENT_SIG, form["callerSig"])
+        assertEquals(GpsOAuthCodec.GMS_CLIENT_SIG, form["client_sig"])
+        assertEquals(GpsOAuthCodec.GMS_CLIENT_SIG, form["callerSig"])
         assertEquals("0011223344556677", form["androidId"])
         assertEquals("owner@example.com", form["Email"])
     }
