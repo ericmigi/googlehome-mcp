@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font-family: -apple-system, sans-serif; padding: 20px; background: #1a1a1a; color: #eee; }
+  h2 { margin: 0 0 4px; }
+  p { color: #aaa; font-size: 14px; }
+  button { padding: 14px 22px; font-size: 16px; border: none; border-radius: 8px; color: #fff;
+           background: #ff4713; margin-top: 8px; }
+  button.out { background: #444; }
+  #status { font-size: 15px; margin: 16px 0; }
+  .ok { color: #6c6; }
+</style>
+</head>
+<body>
+  <h2>Google Home</h2>
+  <p>Sign in to Google to let this plugin control your devices. The sign-in opens in a real Google
+     page — this plugin never sees your password, only the session it needs.</p>
+  <p id="status">Checking…</p>
+  <button id="signin" onclick="signIn()">Sign in to Google</button>
+  <button id="signout" class="out" style="display:none" onclick="signOut()">Sign out</button>
+  <script>
+    var H = window._mcpSettings;
+    function refresh() {
+      if (!H) { document.getElementById('status').textContent = '(host bridge unavailable)'; return; }
+      var signedIn = false;
+      try { signedIn = !!(H.getConfig('master_token') || H.getConfig('oauth_token')); } catch (e) {}
+      document.getElementById('status').innerHTML = signedIn
+        ? '<span class="ok">✓ Signed in to Google.</span>'
+        : 'Not signed in.';
+      document.getElementById('signin').style.display = signedIn ? 'none' : '';
+      document.getElementById('signout').style.display = signedIn ? '' : 'none';
+    }
+    // The native sign-in dialog opens over this WebView; when it closes the WebView doesn't reliably
+    // fire focus/visibilitychange, so poll the store to update the moment the token lands.
+    var pollTimer = null;
+    function startPolling() {
+      if (pollTimer) return;
+      var stopAt = Date.now() + 180000; // give up after 3 min
+      pollTimer = setInterval(function () {
+        var signedIn = H && !!(H.getConfig('master_token') || H.getConfig('oauth_token'));
+        if (signedIn || Date.now() > stopAt) { clearInterval(pollTimer); pollTimer = null; }
+        refresh();
+      }, 700);
+    }
+    function signIn() {
+      // Names the manifest-pinned "google" method; the host runs the cookie capture. Fire-and-forget.
+      if (H) { try { H.signIn('google'); } catch (e) {} }
+      document.getElementById('status').textContent = 'Opening Google sign-in…';
+      startPolling();
+    }
+    function signOut() {
+      if (H) { try { H.setConfig('master_token', ''); H.setConfig('oauth_token', ''); } catch (e) {} }
+      refresh();
+    }
+    // Backups: also refresh on focus/visibility in case the WebView does deliver them.
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) refresh(); });
+    refresh();
+  </script>
+</body>
+</html>

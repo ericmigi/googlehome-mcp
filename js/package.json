@@ -1,0 +1,17 @@
+{
+  "name": "googlehome-mcp-js",
+  "version": "0.1.0",
+  "description": "Google Home MCP plugin for the JS-on-PKJS runtime (single-file esbuild bundle).",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --minify --format=iife --platform=neutral --target=es2020 --outfile=dist/index.js && node -e \"require('fs').copyFileSync('manifest.json','dist/manifest.json')\"",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

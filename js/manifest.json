@@ -1,0 +1,27 @@
+{
+  "id": "googlehome",
+  "name": "Google Home",
+  "version": "0.1.0",
+  "runtime": "pkjs-2",
+  "homepage": "https://home.google.com/",
+  "description": "Control Google Home devices: lights, plugs, switches, locks, thermostats, speakers, and routines. Reads are unrestricted; there is no add or delete surface.",
+  "network": {
+    "allow": [
+      "googlehomefoyer-pa.clients6.google.com",
+      "android.clients.google.com"
+    ]
+  },
+  "settings": { "page": "settings.html" },
+  "auth": {
+    "methods": [
+      {
+        "name": "google",
+        "type": "cookie_capture",
+        "url": "https://accounts.google.com/EmbeddedSetup",
+        "domain": "accounts.google.com",
+        "cookie": "oauth_token",
+        "store_key": "oauth_token"
+      }
+    ]
+  }
+}
