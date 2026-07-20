@@ -8,9 +8,15 @@
   p { color: #aaa; font-size: 14px; }
   button { padding: 14px 22px; font-size: 16px; border: none; border-radius: 8px; color: #fff;
            background: #ff4713; margin-top: 8px; }
-  button.out { background: #444; }
+  button.out, button.alt { background: #444; }
+  input { width: 100%; padding: 12px; font-size: 15px; box-sizing: border-box; margin: 8px 0;
+          background: #2a2a2a; color: #eee; border: 1px solid #444; border-radius: 8px; }
   #status { font-size: 15px; margin: 16px 0; }
   .ok { color: #6c6; }
+  details { margin-top: 22px; border-top: 1px solid #333; padding-top: 12px; }
+  summary { cursor: pointer; color: #ff8a5c; font-size: 14px; }
+  details p { margin: 10px 0 6px; }
+  code { background: #2a2a2a; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -20,6 +26,15 @@
   <p id="status">Checking…</p>
   <button id="signin" onclick="signIn()">Sign in to Google</button>
   <button id="signout" class="out" style="display:none" onclick="signOut()">Sign out</button>
+
+  <details id="manual">
+    <summary>Sign-in not working? Enter a code manually</summary>
+    <p>Open <code>accounts.google.com/EmbeddedSetup</code> in a browser, sign in, then copy the value
+       of the <code>oauth_token</code> cookie (it starts with <code>oauth2_4/</code>) and paste it here.</p>
+    <input id="code" type="text" placeholder="oauth2_4/..." autocapitalize="off" autocomplete="off" spellcheck="false">
+    <button class="alt" onclick="saveCode()">Save code</button>
+  </details>
+
   <script>
     var H = window._mcpSettings;
     function refresh() {
@@ -31,13 +46,14 @@
         : 'Not signed in.';
       document.getElementById('signin').style.display = signedIn ? 'none' : '';
       document.getElementById('signout').style.display = signedIn ? '' : 'none';
+      document.getElementById('manual').style.display = signedIn ? 'none' : '';
     }
     // The native sign-in dialog opens over this WebView; when it closes the WebView doesn't reliably
     // fire focus/visibilitychange, so poll the store to update the moment the token lands.
     var pollTimer = null;
     function startPolling() {
       if (pollTimer) return;
-      var stopAt = Date.now() + 180000; // give up after 3 min
+      var stopAt = Date.now() + 180000;
       pollTimer = setInterval(function () {
         var signedIn = H && !!(H.getConfig('master_token') || H.getConfig('oauth_token'));
         if (signedIn || Date.now() > stopAt) { clearInterval(pollTimer); pollTimer = null; }
@@ -45,16 +61,23 @@
       }, 700);
     }
     function signIn() {
-      // Names the manifest-pinned "google" method; the host runs the cookie capture. Fire-and-forget.
       if (H) { try { H.signIn('google'); } catch (e) {} }
       document.getElementById('status').textContent = 'Opening Google sign-in…';
       startPolling();
+    }
+    // Manual fallback: the pasted oauth_token is stored exactly where the cookie capture would put it,
+    // so index.js exchanges it for a master token on the next tool call.
+    function saveCode() {
+      var v = (document.getElementById('code').value || '').trim();
+      if (!v) return;
+      if (H) { try { H.setConfig('oauth_token', v); } catch (e) {} }
+      document.getElementById('code').value = '';
+      refresh();
     }
     function signOut() {
       if (H) { try { H.setConfig('master_token', ''); H.setConfig('oauth_token', ''); } catch (e) {} }
       refresh();
     }
-    // Backups: also refresh on focus/visibility in case the WebView does deliver them.
     window.addEventListener('focus', refresh);
     document.addEventListener('visibilitychange', function () { if (!document.hidden) refresh(); });
     refresh();
