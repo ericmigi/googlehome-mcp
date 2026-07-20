@@ -1,3 +1,4 @@
 .DS_Store
+.gstack/
 /js/node_modules/
 /js/dist/
