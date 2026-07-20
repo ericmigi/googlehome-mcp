@@ -22,8 +22,8 @@ Authorization: SAPISIDHASH <ts>_<sha1(ts + " " + SAPISID + " " + "https://home.g
                SAPISID1PHASH <...__Secure-1PAPISID...> SAPISID3PHASH <...__Secure-3PAPISID...>
 X-Goog-Api-Key: AIzaSyCMqap8NH88PrhvoBwY1W8ChRUJRjIOJXM   # public web key
 X-Goog-AuthUser: 0
-X-Server-Token: CAMSEhUJ45f_C9a4yibZwhTc5gAdBw==          # rotates; may be omittable
-x-foyer-client-environment: CAd6JgokNTBjZjE2YzktMjkzZS00ZmYzLWE4YWQtODU2YTVhYTVhMzkx  # b64 client env + UUID
+X-Server-Token: <rotating server token>                  # rotates; may be omittable
+x-foyer-client-environment: <base64 client env + client UUID>  # b64 app info + a client UUID
 ```
 
 **The MCP server does NOT have cookies, it has a master token.** So it must mint an OAuth
