@@ -39,7 +39,12 @@ export function inputSchema(t: ToolDef): unknown {
 
 function selectorProps(...extra: [string, ToolProperty][]): Record<string, ToolProperty> {
   const props: Record<string, ToolProperty> = {
-    name: { type: 'string', description: 'Device name to match (case-insensitive substring).' },
+    name: {
+      type: 'string',
+      description:
+        'Device name to match (exact preferred, then case-insensitive substring). A trailing ' +
+        'device kind such as "lights" or "speakers" is tolerated when it fits the action.',
+    },
     room: { type: 'string', description: 'Room name to match (case-insensitive substring), e.g. "kitchen".' },
     type: {
       type: 'string',
@@ -243,6 +248,114 @@ function typeMatches(deviceType: string, want: string): boolean {
   return suffix === want || deviceType.toLowerCase() === want;
 }
 
+/**
+ * Natural requests often append a device kind to a custom Google Home name: "driveway lights"
+ * for a light-capable device actually named "driveway". Only remove leading articles and
+ * trailing kind words that make sense for the action's required capability. This deliberately
+ * avoids general fuzzy/edit-distance matching, which could control the wrong device.
+ */
+const SELECTOR_KIND_WORDS: Record<codec.Capability, ReadonlySet<string>> = {
+  on_off: new Set([
+    'light',
+    'lights',
+    'lamp',
+    'lamps',
+    'bulb',
+    'bulbs',
+    'switch',
+    'switches',
+    'outlet',
+    'outlets',
+    'plug',
+    'plugs',
+    'speaker',
+    'speakers',
+  ]),
+  brightness: new Set(['light', 'lights', 'lamp', 'lamps', 'bulb', 'bulbs']),
+  color_temperature: new Set(['light', 'lights', 'lamp', 'lamps', 'bulb', 'bulbs']),
+  color: new Set(['light', 'lights', 'lamp', 'lamps', 'bulb', 'bulbs']),
+  volume: new Set(['speaker', 'speakers']),
+  lock: new Set(['lock', 'locks']),
+  thermostat: new Set(['thermostat', 'thermostats']),
+  media_transport: new Set([
+    'speaker',
+    'speakers',
+    'player',
+    'players',
+    'tv',
+    'tvs',
+    'display',
+    'displays',
+  ]),
+};
+
+const SELECTOR_LEADING_WORDS = new Set(['the', 'my']);
+
+function selectorNameAliases(wantName: string, requiredCap: codec.Capability): string[] {
+  const original = wantName.split(/\s+/).filter((word) => word !== '');
+  if (original.length < 2) return [];
+
+  const aliases: string[] = [];
+  const kindWords = SELECTOR_KIND_WORDS[requiredCap];
+
+  // Preserve a literal leading article while stripping a trailing kind first. A device may really
+  // be named "The Driveway", which should win exactly over a broader "driveway" substring.
+  const suffixStripped = [...original];
+  while (
+    suffixStripped.length > 1 &&
+    kindWords.has(suffixStripped[suffixStripped.length - 1])
+  ) {
+    suffixStripped.pop();
+    aliases.push(suffixStripped.join(' '));
+  }
+
+  const leadingStripped = [...original];
+  while (leadingStripped.length > 1 && SELECTOR_LEADING_WORDS.has(leadingStripped[0])) {
+    leadingStripped.shift();
+    aliases.push(leadingStripped.join(' '));
+  }
+  while (
+    leadingStripped.length > 1 &&
+    kindWords.has(leadingStripped[leadingStripped.length - 1])
+  ) {
+    leadingStripped.pop();
+    aliases.push(leadingStripped.join(' '));
+  }
+  return [
+    ...new Set(
+      aliases.filter((alias) => {
+        const words = alias.split(/\s+/);
+        return (
+          alias !== '' &&
+          alias !== wantName &&
+          words.some((word) => !SELECTOR_LEADING_WORDS.has(word) && !kindWords.has(word))
+        );
+      }),
+    ),
+  ];
+}
+
+function matchExactDeviceNames(devices: codec.Device[], wantedNames: string[]): codec.Device[] {
+  for (const wanted of wantedNames) {
+    const exact = devices.filter((device) => device.name.trim().toLowerCase() === wanted);
+    if (exact.length > 0) return exact;
+  }
+  return [];
+}
+
+function matchSubstringDeviceNames(devices: codec.Device[], wantedNames: string[]): codec.Device[] {
+  for (const wanted of wantedNames) {
+    const substring = devices.filter((device) => device.name.trim().toLowerCase().includes(wanted));
+    if (substring.length > 0) return substring;
+  }
+  return [];
+}
+
+function matchDeviceNames(devices: codec.Device[], wantedNames: string[]): codec.Device[] {
+  const exact = matchExactDeviceNames(devices, wantedNames);
+  return exact.length > 0 ? exact : matchSubstringDeviceNames(devices, wantedNames);
+}
+
 function describeSelector(sel: Selector): string {
   const parts = [
     sel.name && sel.name.trim() !== '' ? `name="${sel.name}"` : null,
@@ -271,7 +384,11 @@ function norm(s: string | undefined): string | null {
   return t && t !== '' ? t : null;
 }
 
-async function resolve(foyer: FoyerClient, sel: Selector): Promise<codec.Device[]> {
+async function resolve(
+  foyer: FoyerClient,
+  sel: Selector,
+  requiredCap: codec.Capability,
+): Promise<codec.Device[]> {
   if (norm(sel.name) == null && norm(sel.room) == null && norm(sel.type) == null) {
     throw new Error(
       'Provide at least one selector: name, room, and/or type (e.g. type="light" for all lights, ' +
@@ -294,8 +411,15 @@ async function resolve(foyer: FoyerClient, sel: Selector): Promise<codec.Device[
   if (wantName == null) {
     matches = scoped;
   } else {
-    const exact = scoped.filter((d) => d.name.trim().toLowerCase() === wantName);
-    matches = exact.length > 0 ? exact : scoped.filter((d) => d.name.trim().toLowerCase().includes(wantName));
+    matches = matchDeviceNames(scoped, [wantName]);
+    if (matches.length === 0) {
+      const aliases = selectorNameAliases(wantName, requiredCap);
+      matches = matchExactDeviceNames(scoped, aliases);
+      if (matches.length === 0) {
+        const capable = scoped.filter((device) => device.capabilities.has(requiredCap));
+        matches = matchSubstringDeviceNames(capable, aliases);
+      }
+    }
   }
 
   if (matches.length === 0) {
@@ -435,7 +559,7 @@ async function applyControl(
   capLabel: string,
   action: (d: codec.Device) => Promise<codec.DeviceState>,
 ): Promise<unknown> {
-  const devices = await resolve(foyer, selectorFrom(args));
+  const devices = await resolve(foyer, selectorFrom(args), requiredCap);
   const rows: Record<string, unknown>[] = [];
   for (const d of devices) {
     if (!d.capabilities.has(requiredCap)) {
