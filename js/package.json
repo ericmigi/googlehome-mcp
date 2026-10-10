@@ -5,7 +5,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --minify --format=iife --platform=neutral --target=es2020 --outfile=dist/index.js && node -e \"require('fs').copyFileSync('manifest.json','dist/manifest.json')\"",
+    "build": "esbuild src/index.ts --bundle --minify --format=iife --platform=neutral --target=es2020 --outfile=dist/index.js && node -e \"for (const file of ['manifest.json', 'settings.html']) require('fs').copyFileSync(file, 'dist/' + file)\"",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
